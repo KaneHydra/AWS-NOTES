@@ -1,0 +1,26 @@
+{
+    "Rules": [
+        {
+            "ID": "emptybucket",
+            "Status": "Enabled",
+            "Filter": {},
+            "Expiration": {
+                "Days": 2
+            },
+            "NoncurrentVersionExpiration": {
+                "NoncurrentDays": 2
+            },
+            "AbortIncompleteMultipartUpload": {
+                "DaysAfterInitiation": 2
+            },
+            "Transitions": [],
+            "NoncurrentVersionTransitions": [],
+            "NoncurrentVersionActions": [
+                {
+                    "NoncurrentDays": 1,
+                    "Action": "DELETE"
+                }
+            ]
+        }
+    ]
+}
