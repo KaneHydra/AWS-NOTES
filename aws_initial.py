@@ -1,12 +1,15 @@
 # -*- coding=utf-8 -*-
 # pip install boto3
+import os
 import csv
+import json
 import boto3
 # import logging
-from datetime import datetime
+# from datetime import datetime
 from aws_config import get_aws_keys
 from typing import Union,List,Dict
 from rich import print
+from botocore.exceptions import ClientError
 
 KEY_STORAGE_PATH = './key/hydralisk.hk/'
 
@@ -28,6 +31,7 @@ KEY_STORAGE_PATH = './key/hydralisk.hk/'
 # logger.addHandler(ch)
 # logger.addHandler(fh)
 
+
 ACCESS_KEY,SECRET_KEY = get_aws_keys(key='hk.root')
 print(f'{ACCESS_KEY=}\n{SECRET_KEY=}')
 
@@ -43,6 +47,7 @@ session = boto3.Session(
 def create_user(
         iam,
         username:str,
+        password:Union[str,None]=None,
         policies:Union[str,List[str],None]=None,
         groups:Union[str,List[str],None]=None,
         tags:Union[Dict[str,str],None]=None,
@@ -53,9 +58,21 @@ def create_user(
     try:
         # 檢查是否有username?
         res = iam.create_user(UserName=username)
-        print('success!\n'+res)
+        print('success!')
+        print(res)
     except iam.exceptions.EntityAlreadyExistsException:
         print('username already exist!')
+    if password:
+        try:
+            res = iam.create_login_profile(
+                UserName=username,
+                Password=password,
+                PasswordResetRequired=False
+            )
+            print('create password success!')
+            print(res)
+        except iam.exceptions.EntityAlreadyExistsException:
+            print('password already exist!')
     # Attach AdministratorAccess policies to the username
     if policies:
         # 檢查是否有Policy?
@@ -90,7 +107,7 @@ def create_user(
         for group in groups:
             print(f'{group=}')
             try:
-                res = iam.client.add_user_to_group(
+                res = iam.add_user_to_group(
                     UserName=username,
                     GroupName=group
                 )
@@ -128,7 +145,7 @@ def create_user(
         if res:
             print(res)
             access_key = res['AccessKey']
-            with open(KEY_STORAGE_PATH+username+'_credentials.csv',
+            with open(KEY_STORAGE_PATH+username+'_accessKeys.csv',
                       mode='w',encoding='utf-8-sig',newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(['Access key ID','Secret access key'])
@@ -151,13 +168,15 @@ def create_group(
         iam,
         groupname:str,
         policies:Union[str,List[str],None]=None,
-        tags:Union[Dict[str,str],None]=None,
         users:Union[str,List[str],None]=None,
     ):
     print('create group')
     # Create an IAM group
-    res = iam.create_group(GroupName=groupname)
-    print(res)
+    try:
+        res = iam.create_group(GroupName=groupname)
+        print(res)
+    except iam.exceptions.EntityAlreadyExistsException:
+        print(f'group {groupname} exists!')
     if policies:
         # 檢查是否有Policy?
         if isinstance(policies,str):
@@ -166,22 +185,10 @@ def create_group(
         for policy in policies:
             print(policy)
             try:
-                res = iam.attach_group_policy(UserName=username,PolicyArn=policy)
+                res = iam.attach_group_policy(GroupName=groupname,PolicyArn=policy)
                 print(res)
             except iam.exceptions.EntityAlreadyExistsException:
                 print('policy already exist!')
-    if tags:
-        # 檢查是否有Tag?
-        # Add tags to the username
-        try:
-            print(f'\ntag group:')
-            res = iam.tag_group(
-                UserName=username,
-                Tags=[{'Key':k,'Value':v} for k,v in tags.items()]
-            )
-            print(res)
-        except iam.exceptions.EntityAlreadyExistsException:
-            print('tag already exist!')
     if users:
         # 檢查是否在群組中?
         print('\nadd group:')
@@ -191,7 +198,7 @@ def create_group(
         for user in users:
             print(f'{user=}')
             try:
-                res = iam.client.add_user_to_group(
+                res = iam.add_user_to_group(
                     UserName=user,
                     GroupName=groupname
                 )
@@ -208,6 +215,7 @@ iam = session.client('iam')
 admin_user_access_key = create_user(
     iam,
     'ai0125AdminUser',
+    password='Asd21609+',
     policies='arn:aws:iam::aws:policy/IAMFullAccess',
     tags={'Name':'ai0125AdminUser','UseCase':'Administration'},
     create_access_key=True
@@ -219,7 +227,7 @@ if admin_user_access_key:
     SECRET_KEY = admin_user_access_key['SecretAccessKey']
 else:
     print('get aws keys')
-    ACCESS_KEY,SECRET_KEY = get_aws_keys(key='ai0125adminUser')
+    ACCESS_KEY,SECRET_KEY = get_aws_keys(key='ai0125AdminUser')
 
 print(f'{ACCESS_KEY=}\n{SECRET_KEY=}')
 
@@ -234,6 +242,7 @@ session = boto3.Session(
 super_user_access_key = create_user(
     iam,
     'ai0125SuperUser',
+    password='Asd21609+',
     policies='arn:aws:iam::aws:policy/AdministratorAccess',
     tags={'Name':'ai0125SuperUser','UseCase':'RootAccess'},
     create_access_key=True
@@ -243,8 +252,7 @@ super_user_access_key = create_user(
 create_group(
     iam,
     'ai0125class',
-     policies= 'arn:aws:iam::aws:policy/AmazonS3FullAccess',
-    tags={'Name':'ai0125class'},
+     policies='arn:aws:iam::aws:policy/AmazonS3FullAccess',
     users=['ai0125AdminUser']
 )
 
@@ -252,7 +260,6 @@ create_group(
     iam,
     'ai0125classVPCuser',
     policies='arn:aws:iam::aws:policy/AmazonVPCFullAccess',
-    tags={'Name':'ai0125classVPCuser'}
 )
 
 create_user(
@@ -263,7 +270,95 @@ create_user(
 )
 # 這個帳號沒有設定密碼, 無法登入
 
+
+
+def create_bucket(bucket_name:str, region:Union[str,None]=None)->bool:
+    """Create an S3 bucket in a specified region
+    If a region is not specified, the bucket is created in the S3 default
+    region (us-east-1).
+    :param bucket_name: Bucket to create
+    :param region: String region to create bucket in, e.g., 'us-west-2'
+    :return: True if bucket created, else False
+    """
+    # Create bucket
+    try:
+        if region is None:
+            s3_client = boto3.client('s3')
+            s3_client.create_bucket(Bucket=bucket_name)
+        else:
+            s3_client = boto3.client('s3', region_name=region)
+            location = {'LocationConstraint': region}
+            s3_client.create_bucket(Bucket=bucket_name,
+                                    CreateBucketConfiguration=location)
+    except ClientError as e:
+        print(e)
+        return False
+    return True
+
+
+def s3_upload_file(file_name:str, bucket:str, object_name:Union[str,None]=None)->bool:
+    """Upload a file to an S3 bucket
+    :param file_name: File to upload
+    :param bucket: Bucket to upload to
+    :param object_name: S3 object name. If not specified then file_name is used
+    :return: True if file was uploaded, else False
+    """
+    # If S3 object_name was not specified, use file_name
+    if object_name is None:
+        object_name = os.path.basename(file_name)
+    # Upload the file
+    s3_client = boto3.client('s3')
+    try:
+        res = s3_client.upload_file(file_name, bucket, object_name)
+        print(res)
+    except ClientError as e:
+        print(e)
+        return False
+    return True
+
+
+def create_bucket_with_poicies(
+        s3,
+        bucket_name:str,
+        bucket_file_path:str,
+        region:Union[str,None]='us-east-1'
+    )->bool:
+
+    create_res = create_bucket(bucket_name,region)
+
+    bucket_policy = {
+        "Id": "Policy1613735718314",
+        'Version': '2012-10-17',
+        'Statement': [
+            {
+                "Sid": "Stmt1613735715412",
+                "Action": ["s3:GetObject"],
+                "Effect": "Allow",
+                'Resource': f'arn:aws:s3:::{bucket_name}/*',
+                "Principal": "*",
+            }
+        ]
+    }
+    # Convert the policy from JSON dict to string
+    bucket_policy = json.dumps(bucket_policy)
+    s3.put_bucket_policy(Bucket=bucket_name, Policy=bucket_policy)
+    for root,dirs,files in os.walk(bucket_file_path):
+        for file in files:
+            file_path = os.path.join(root,file)
+            print(f'upload file...\n'+file_path)
+            upload_res = s3_upload_file(file_path,bucket_name,file)
+            print(f'result: {upload_res}')
+    return False
+
+
+# Set the new policy
+s3 = boto3.client('s3')
+
 # 建立 S3 bucket
+res = create_bucket_with_poicies(s3,'ai0125s3bucket','./ai0125/ai0125s3bucket01/')
+res = create_bucket_with_poicies(s3,'ai0125s3bucket2','./ai0125/ai0125s3bucket02/')
+
+
 # 開啓版本管理
 # 開啓公開訪問權限
 # 設定 BucketPolicy
@@ -290,120 +385,3 @@ create_user(
 
 # 建立 Cluster
 # 建立 ngnix task
-
-def delete_user(user_name):
-    try:
-        iam.User(user_name).delete()
-        print(f"User {user_name} deleted successfully.")
-    except Exception as e:
-        print(f"Error deleting user {user_name}: {str(e)}")
-
-# response = iam.detach_user_policy(
-#     UserName='first_user',
-#     PolicyArn='arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess'
-# )
-
-client = boto3.client('iam')
-
-print('\nList Groups\n')
-# List all groups
-group_res = iam.list_groups()
-for group in group_res['Groups']:
-    group_details = iam.get_group(GroupName=group['GroupName'])
-    print(group['GroupName'])
-    for user in group_details['Users']:
-        print(" -", user['UserName'])
-
-
-print('\nList Users\n')
-user_data = client.list_users()
-print(f'user_data:\n{user_data}\n')
-user_name_list = [_['UserName'] for _ in user_data['Users']]
-print(f'{user_name_list=}')
-user_paginator = client.get_paginator('list_users')
-# {
-#     "Users": [
-#         {
-#             "Path": "/",
-#             "UserName": "ai0125SuperUser",
-#             "UserId": "AIDAXYKJUFZLDF3CWWE4I",
-#             "Arn": "arn:aws:iam::533267230294:user/ai0125SuperUser",
-#             "CreateDate": datetime.datetime(2024, 6, 12, 3, 11, 12, tzinfo=tzutc()),
-#         },
-#         {}
-#     ],
-#     "IsTruncated": False,
-#     "ResponseMetadata": {
-#         "RequestId": "377c35e8-9cfb-45cd-a9e4-7b70cdf94dc3",
-#         "HTTPStatusCode": 200,
-#         "HTTPHeaders": {
-#             "date": "Wed, 12 Jun 2024 03:29:39 GMT",
-#             "x-amzn-requestid": "377c35e8-9cfb-45cd-a9e4-7b70cdf94dc3",
-#             "content-type": "text/xml",
-#             "content-length": "567"
-#         },
-#         "RetryAttempts": 0
-#     }
-# }
-for res in user_paginator.paginate():
-    print(f'\nuser:\n{res}')
-
-
-print('\nList User Policies\n')
-policies_response = client.list_policies(
-    Scope='AWS', # 'All'|'AWS'|'Local',
-    OnlyAttached=True, # True|False,
-    # PathPrefix='string',
-    PolicyUsageFilter='PermissionsPolicy', # 'PermissionsPolicy'|'PermissionsBoundary',
-    # Marker='string',
-    # MaxItems=123
-)
-print(f'{policies_response=}')
-
-policies_list = [_ for _ in policies_response['Policies']]
-print(f"{policies_list=}")
-
-print('\nList Access Keys:\n')
-access_keys_info = client.list_access_keys()
-print(f'access_keys_info:\n{access_keys_info}\n')
-# List access keys through the pagination interface.
-access_keys_paginator = iam.get_paginator('list_access_keys')
-
-for username in user_name_list:
-    print(f'\n{username=}')
-    for acc_key in access_keys_paginator.paginate(UserName=username):
-        print(f'{acc_key=}')
-        # Delete access key
-        # for info in acc_key['AccessKeyMetadata']:
-        #     iam.delete_access_key(
-        #         AccessKeyId=info['AccessKeyId'],
-        #         UserName=username
-        #     )
-    print('User Policies')
-    # inline_user_policies = client.list_user_policies(UserName=username)
-    # print(f'{inline_user_policies=}')
-    attached_policies = client.list_attached_user_policies(UserName=username)
-    print(f'attached_policies=\n{attached_policies}\n')
-    # Print policy details
-    for policy in attached_policies['AttachedPolicies']:
-        print(f"Policy Name: {policy['PolicyName']}")
-        print(f"Policy ARN: {policy['PolicyArn']}")
-        print(f"Policy Description: {policy.get('Description', 'N/A')}\n")
-        # detach_user_policy(username,policy['PolicyArn'])
-    # Delete User
-    # Delete a user
-    # iam.delete_user(
-    #     UserName=username
-    # )
-
-# ACCESS_KEY,SECRET_KEY = get_aws_keys(key='hk.root')
-# print(f'{ACCESS_KEY=}\n{SECRET_KEY=}')
-
-# super_user_access_key = create_user(
-#     iam,
-#     'ai0125AdminUser',
-#     policies='arn:aws:iam::aws:policy/AdministratorAccess',
-#     tags={'Name':'ai0125AdminUser','UseCase':'Administration'},
-#     create_access_key=True
-# )
-#
